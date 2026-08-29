@@ -623,7 +623,16 @@ class InkDataset(Dataset):
         if self.mode == "flat":
             return self._flat_sample(self.patches[requested_index])
         current_index = requested_index
+        # The seeded replacement is a deterministic function of the current
+        # index, so the retry relation is a finite directed graph and therefore
+        # contains cycles.  Reaching a cycle whose patches are all inadmissible
+        # used to loop forever and hang the DataLoader worker, even when
+        # admissible patches existed elsewhere.  Tracking what has been tried
+        # keeps the seeded choice wherever it is untried, and guarantees the
+        # loop ends.
+        attempted: set[int] = set()
         while True:
+            attempted.add(current_index)
             patch = self.patches[current_index]
             sample = self._native_sample(patch)
             if sample is not None:
@@ -633,10 +642,22 @@ class InkDataset(Dataset):
                     "Cannot resample an inadmissible native patch from a dataset "
                     "with one patch"
                 )
+            if len(attempted) >= len(self.patches):
+                raise RuntimeError(
+                    "No native patch produced an admissible crop for requested "
+                    f"idx {requested_index} after attempting all "
+                    f"{len(self.patches)} patches"
+                )
             rng = random.Random(self.config.seed + current_index * 7919)
             replacement = current_index
             while replacement == current_index:
                 replacement = rng.randrange(len(self.patches))
+            if replacement in attempted:
+                replacement = next(
+                    candidate
+                    for candidate in range(len(self.patches))
+                    if candidate not in attempted
+                )
             warnings.warn(
                 "Native patch could not produce an admissible crop for "
                 f"requested idx {requested_index}, patch idx {current_index}; "
