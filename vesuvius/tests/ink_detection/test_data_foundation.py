@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import pickle
 import random
+from types import SimpleNamespace
 import warnings
 
 import numpy as np
@@ -790,3 +791,88 @@ def test_full_3d_merges_intersecting_segment_supervision(tmp_path, monkeypatch):
     expected_labels[1, 2, 2] = 1
     np.testing.assert_array_equal(supervision, expected_supervision)
     np.testing.assert_array_equal(labels, expected_labels)
+
+
+class _RetryStub:
+    """The minimum InkDataset.__getitem__ touches in native mode."""
+
+    def __init__(self, n_patches: int, admissible=(), seed: int = 17) -> None:
+        self.mode = "full_3d"
+        self.patches = [object() for _ in range(n_patches)]
+        self.config = SimpleNamespace(seed=seed)
+        self._admissible = set(admissible)
+        self.tried: list[int] = []
+
+    def _native_sample(self, patch):
+        index = self.patches.index(patch)
+        self.tried.append(index)
+        return {"image": index} if index in self._admissible else None
+
+
+def _getitem(stub, index):
+    from vesuvius.ink_detection.data.dataset import InkDataset
+
+    return InkDataset.__getitem__(stub, index)
+
+
+def test_native_retry_terminates_when_every_patch_is_inadmissible():
+    """The seeded replacement is a deterministic function of the index, so the
+    retry relation is a finite graph and contains cycles.  With two patches the
+    only successor of 0 is 1 and of 1 is 0, which used to loop forever."""
+    stub = _RetryStub(2, admissible=())
+    with pytest.warns(RuntimeWarning):
+        with pytest.raises(RuntimeError, match="after attempting all 2 patches"):
+            _getitem(stub, 0)
+    assert sorted(set(stub.tried)) == [0, 1]
+
+
+@pytest.mark.parametrize("n_patches", [2, 10, 100])
+def test_native_retry_terminates_for_any_dataset_size(n_patches):
+    stub = _RetryStub(n_patches, admissible=())
+    with pytest.warns(RuntimeWarning):
+        with pytest.raises(RuntimeError, match="after attempting all"):
+            _getitem(stub, 0)
+    # every patch attempted exactly once, so no index is walked twice
+    assert sorted(stub.tried) == list(range(n_patches))
+
+
+def test_native_retry_finds_an_admissible_patch_behind_a_cycle():
+    """A reached all-inadmissible cycle must not hide admissible patches
+    elsewhere in the dataset."""
+    stub = _RetryStub(10, admissible={7})
+    with pytest.warns(RuntimeWarning):
+        assert _getitem(stub, 0) == {"image": 7}
+    assert stub.tried[-1] == 7
+
+
+def test_an_admissible_patch_is_returned_without_resampling():
+    stub = _RetryStub(4, admissible={0, 1, 2, 3})
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", RuntimeWarning)
+        assert _getitem(stub, 2) == {"image": 2}
+    assert stub.tried == [2]
+
+
+def test_the_seeded_replacement_is_kept_when_it_is_untried():
+    """The fix only intervenes on a repeat, so the existing seeded choice has
+    to survive in the ordinary single-retry case."""
+    import random as _random
+
+    seed, n = 17, 10
+    rng = _random.Random(seed + 0 * 7919)
+    expected = 0
+    while expected == 0:
+        expected = rng.randrange(n)
+
+    stub = _RetryStub(n, admissible={expected}, seed=seed)
+    with pytest.warns(RuntimeWarning):
+        assert _getitem(stub, 0) == {"image": expected}
+    assert stub.tried == [0, expected]
+
+
+def test_a_single_patch_dataset_still_reports_its_own_error():
+    stub = _RetryStub(1, admissible=())
+    with pytest.raises(RuntimeError, match="dataset with one patch"):
+        _getitem(stub, 0)
