@@ -100,6 +100,22 @@ PHercParis4 store has no `format` key and contains only `metadata.json` — no
 per-level metadata — so the level is discarded with no warning and the log
 prints `Loaded normal grid level 0` regardless of what you asked for.
 
+Filed as villa #1776; #1798 (CVasilopoulos, 15 Sep 2026) adds a warning that
+names the requested level, the store, and the level actually used, for both
+the single-scale case and an out-of-range level on a multiscale store.
+The multiscale grids are not published, but they can be derived from a local
+copy of the single-scale store:
+
+```
+vc_gen_normalgrids pyramid -i /path/to/normal_grids -o /path/to/normal_grids_ms \
+    --min-level 0 --max-level 5
+```
+
+and `normal_grid_path` then points at the `_ms` store, whose `metadata.json`
+carries `"format": "normal-grid-multiscale"` with `min-level` / `max-level`.
+That is the route to a level-2 run; asking for level 2 on the published
+store is not.
+
 **`direction_fields` wants a `x`/`y`/`z` layout.** Stores are read as
 `<path>/{x,y,z}/<scale>`. The published `.normal-grids` store is laid out
 `xy/ xz/ yz/ xy_img/`, so it is *not* a `direction_fields` store — passing it
